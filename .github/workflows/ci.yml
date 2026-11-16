@@ -1,0 +1,97 @@
+name: CI MLflow
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "MLProject/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+# Hasil pelatihan (mlruns/) di-commit kembali oleh github-actions[bot].
+permissions:
+  contents: write
+
+# Mencegah dua run saling menimpa commit mlruns/.
+concurrency:
+  group: ci-mlflow
+  cancel-in-progress: false
+
+env:
+  CSV_URL: "MLProject/ai4i2020_preprocessing/train.csv"
+  IMAGE_NAME: smsml-predictive-maintenance
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Run actions/checkout@v7
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12.7
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.7"
+
+      - name: Check Env
+        run: |
+          echo "$CSV_URL"
+          test -f "$CSV_URL"
+          python --version
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install mlflow==2.19.0 scikit-learn==1.6.0 pandas==2.2.3 \
+            numpy==2.2.1 scipy==1.14.1 cloudpickle==3.1.0
+
+      - name: Run mlflow project
+        run: |
+          mlflow run MLProject --env-manager=local
+
+      - name: Get latest MLflow run_id
+        run: |
+          RUN_ID=$(ls -td mlruns/0/*/ | head -n 1 | cut -d'/' -f3)
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+          echo "Latest run_id: $RUN_ID"
+
+      - name: Upload mlruns to GitHub artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mlruns-${{ github.run_number }}
+          path: mlruns/
+
+      - name: Save mlruns to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f mlruns/
+          if git diff --cached --quiet; then
+            echo "Tidak ada perubahan pada mlruns/"
+          else
+            git commit -m "Simpan mlruns dari CI run ${{ github.run_number }}"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
+
+      - name: Build Docker Model
+        run: |
+          mlflow models build-docker --model-uri "runs:/$RUN_ID/model" --name "$IMAGE_NAME"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - name: Tag Docker Image
+        run: |
+          docker tag "$IMAGE_NAME" "${{ secrets.DOCKER_HUB_USERNAME }}/$IMAGE_NAME:latest"
+          docker tag "$IMAGE_NAME" "${{ secrets.DOCKER_HUB_USERNAME }}/$IMAGE_NAME:${{ github.sha }}"
+
+      - name: Push Docker Image
+        run: |
+          docker push "${{ secrets.DOCKER_HUB_USERNAME }}/$IMAGE_NAME:latest"
+          docker push "${{ secrets.DOCKER_HUB_USERNAME }}/$IMAGE_NAME:${{ github.sha }}"
